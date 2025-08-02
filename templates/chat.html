@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat</title>
+    <link rel="stylesheet" href="/static/css/chatting.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.4.1/socket.io.js"></script>
+</head>
+<body>
+
+<div id="container">
+    <!-- Sidebar -->
+    <div id="sidebar">
+        <h3>Recent Chats</h3>
+        <ul id="recent-users"></ul>
+
+        <h3>Requests</h3>
+        <ul id="chat-requests"></ul>
+    </div>
+
+    <!-- Main chat container -->
+    <div id="chat-container">
+        <h2>Welcome, {{ user.username }}</h2>
+
+        <h3>Chat with:</h3>
+        <input type="text" id="receiver" placeholder="Enter username to chat">
+        <ul id="user-suggestions" class="suggestions-box" style="list-style: none; position: absolute; background: #fff; border: 1px solid #ccc; display: none;"></ul>
+        <button onclick="joinChat()">Start Chat</button>
+
+        <div id="chat-box"></div>
+
+        <input type="text" id="message" placeholder="Type a message">
+        <button id="send" onclick="sendMessage()">Send</button>
+
+        <input type="file" id="fileInput">
+        <button onclick="sendFile()">Send File</button>
+    </div>
+</div>
+
+<script>
+    const socket = io.connect("http://" + document.domain + ":" + location.port);
+    const username = "{{ user.username }}";
+    let chatRoom = "";
+    let requestUsers = new Set();
+
+    function joinChat(fromRequest = false) {
+        const receiverInput = document.getElementById("receiver");
+        chatRoom = receiverInput.value.trim();
+
+        if (!chatRoom) {
+            alert("Enter a valid username to chat with!");
+            return;
+        }
+
+        fetch(`/check_user/${chatRoom}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.exists) {
+                socket.emit("join", { room: username });
+
+                fetch(`/chat_history/${chatRoom}`)
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById("chat-box").innerHTML = "";
+                    data.messages.forEach(msg => {
+                        appendMessage(msg.sender, msg.message);
+                    });
+                });
+
+                if (!fromRequest) {
+                    addToRecentUsers(chatRoom);
+                }
+
+                document.getElementById("chat-box").innerHTML += `<b>Connected to ${chatRoom}</b><br>`;
+                document.getElementById("user-suggestions").style.display = "none";
+            } else {
+                alert("User does not exist!");
+            }
+        });
+    }
+
+    function sendMessage() {
+        const message = document.getElementById("message").value;
+        if (!chatRoom) {
+            alert("Start a chat first!");
+            return;
+        }
+        if (!message.trim()) {
+            alert("Message cannot be empty!");
+            return;
+        }
+
+        socket.emit("private_message", { receiver: chatRoom, message: message });
+        appendMessage(username, message, "sent");
+        document.getElementById("message").value = "";
+    }
+
+    function sendFile() {
+        const fileInput = document.getElementById("fileInput");
+        const file = fileInput.files[0];
+
+        if (!file || !chatRoom) {
+            alert("Select a file and start a chat!");
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("receiver", chatRoom);
+
+        fetch("/upload_file", {
+            method: "POST",
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            appendMessage(username, `[File] ${data.filename}`, "sent");
+            fileInput.value = "";
+        });
+    }
+
+    function appendMessage(sender, message) {
+        const chatBox = document.getElementById("chat-box");
+        const msgDiv = document.createElement("div");
+        msgDiv.classList.add("message");
+        msgDiv.classList.add(sender === username ? "sent" : "received");
+
+        if (message.startsWith("[File] ")) {
+            const fileName = message.replace("[File] ", "");
+            const fileLink = document.createElement("a");
+            fileLink.href = `/static/uploads/${fileName}`;
+            fileLink.target = "_blank";
+            fileLink.textContent = `📎 ${fileName}`;
+            msgDiv.appendChild(fileLink);
+        } else {
+            msgDiv.textContent = message;
+        }
+
+        chatBox.appendChild(msgDiv);
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    socket.on("private_message", function(data) {
+        if (data.sender !== chatRoom && !isInRecent(data.sender)) {
+            if (!requestUsers.has(data.sender)) {
+                addToRequests(data.sender);
+                requestUsers.add(data.sender);
+            }
+            return;
+        }
+        appendMessage(data.sender, data.message);
+    });
+
+    function isInRecent(user) {
+        const users = JSON.parse(localStorage.getItem("recentUsers")) || [];
+        return users.includes(user);
+    }
+
+    function addToRecentUsers(user) {
+        let users = JSON.parse(localStorage.getItem("recentUsers")) || [];
+        users = users.filter(u => u !== user);
+        users.unshift(user);
+        if (users.length > 10) users = users.slice(0, 10);
+        localStorage.setItem("recentUsers", JSON.stringify(users));
+        renderRecentUsers();
+    }
+
+    function renderRecentUsers() {
+        const userList = document.getElementById("recent-users");
+        userList.innerHTML = "";
+        const users = JSON.parse(localStorage.getItem("recentUsers")) || [];
+
+        users.forEach(user => {
+            const li = document.createElement("li");
+            li.textContent = user;
+            li.onclick = () => {
+                document.getElementById("receiver").value = user;
+                joinChat(true);
+            };
+            userList.appendChild(li);
+        });
+    }
+
+    function addToRequests(user) {
+        const reqList = document.getElementById("chat-requests");
+
+        const li = document.createElement("li");
+        li.innerHTML = `
+            <span>${user}</span>
+            <button onclick="acceptRequest('${user}')">✅</button>
+            <button onclick="rejectRequest(this, '${user}')">❌</button>
+        `;
+        reqList.appendChild(li);
+    }
+
+    function acceptRequest(user) {
+        document.getElementById("receiver").value = user;
+        joinChat();
+        addToRecentUsers(user);
+        removeRequest(user);
+    }
+
+    function rejectRequest(btn, user) {
+        removeRequest(user);
+    }
+
+    function removeRequest(user) {
+        const reqList = document.getElementById("chat-requests");
+        [...reqList.children].forEach(li => {
+            if (li.textContent.includes(user)) {
+                li.remove();
+            }
+        });
+        requestUsers.delete(user);
+    }
+
+    // ✅ Fixed Suggestion Logic (works with /user_suggestions)
+    document.getElementById("receiver").addEventListener("input", function () {
+        const input = this.value;
+        const list = document.getElementById("user-suggestions");
+        if (!input) {
+            list.style.display = "none";
+            return;
+        }
+
+        fetch(`/user_suggestions?q=${encodeURIComponent(input)}`)
+            .then(res => res.json())
+            .then(data => {
+                list.innerHTML = "";
+                if (data.users.length > 0) {
+                    data.users.forEach(user => {
+                        const li = document.createElement("li");
+                        li.textContent = user;
+                        li.style.padding = "5px 10px";
+                        li.style.cursor = "pointer";
+                        li.onclick = () => {
+                            document.getElementById("receiver").value = user;
+                            list.style.display = "none";
+                        };
+                        list.appendChild(li);
+                    });
+
+                    const inputRect = this.getBoundingClientRect();
+                    list.style.top = `${inputRect.bottom + window.scrollY}px`;
+                    list.style.left = `${inputRect.left + window.scrollX}px`;
+                    list.style.display = "block";
+                } else {
+                    list.style.display = "none";
+                }
+            });
+    });
+
+    window.onload = function () {
+        renderRecentUsers();
+        socket.emit("join", { room: username });
+    };
+</script>
+
+</body>
+</html>
